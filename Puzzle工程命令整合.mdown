@@ -1,0 +1,150 @@
+# Puzzle工程命令整合
+## 创建App
+1. 获取projectName(工程名)，repoPath(仓库地址),description(工程描述)
+2. 判断数据库中是否已有该工程，没有的话上述3条写入数据库
+
+## 编辑App
+* 编辑app的projectName, repoPath, description, 变动value值，重新再写入数据库
+
+## 创建Version
+1. 加锁防止两个create动作同时发生，禁止对同一工程create两个相同version
+2. 新增app version，记录各种状态(appId, version, 时间戳)，commit入库
+3. 创新版本库的script
+	    	    git_repo_init_command = "mkdir -p ~/Projects/%s; \
+            cd ~/Projects/%s; \
+            git clone %s %s; \
+            cd %s; \
+            git fetch; \
+            git checkout -b develop_i-%s_%s; \
+            git push origin develop_i-%s_%s:develop_i-%s_%s; \
+            " % (name, name, repo, version, version, name, version, name, version, name, version)
+4. 如果有PodFile指定依赖库，clone这些库, clone Podfile中第三库代码如下
+	            if os.path.exists(podfile_path):
+
+                f = open(podfile_path, 'r')
+                lines = f.readlines()
+
+                for line in lines:
+                    if line.strip()[0:1] == '#':
+                        pass
+                    elif line.strip().lower()[0:3] == 'pod':
+                        list = line.strip().split(' ')
+                        if not os.path.exists('%s/dependency/%s' % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], list[1][1:-2])):
+                            if list[2] == ':git':
+                                command = 'cd %s/dependency; git clone %s %s;' % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], list[4], list[1][1:-2])
+                                p = subprocess.Popen(command,shell=True, stdout=subprocess.PIPE)
+                                for output_line in iter(p.stdout.readline, ''):
+                                    print output_line,
+                                    sys.stdout.flush()
+                #############################################
+                f.close()
+     上述动作，完成后，进行状态改变，入库动作
+
+## 删除App_Version
+* 本地的db delete操作
+
+## 打包操作App_Version
+* 拉去最新工程代码
+	    command =  "cd %s/%s/%s; \
+                    git reset --hard HEAD; \
+                    git pull origin develop_i-%s_%s;\
+                    git log -1 | head -n1;" % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], name, version, name, version)
+        app_version_commit = ""  #记录主工程当前commit
+        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+        for head in iter(p.stdout.readline, ''):
+            if head[0:6] == "commit":
+                app_version_commit = head[7:17]
+
+* 读取本项目工程下的Podfile, 取出所有依赖包 ~/Projects/dependency 下面所有依赖包的head sha1码, 写入项目工程下的 Podfile 文件对应的位置
+	            podfile_path = '%s/%s/%s/Podfile' % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], name, version)
+
+        if os.path.exists(podfile_path):
+
+            fr = open(podfile_path, 'r')
+            podfile_content = ""
+            lines = fr.readlines()
+
+            for line in lines:
+                if line.strip()[0:1] == '#':
+                    podfile_content += line
+                elif line.strip().lower()[0:3] != 'pod':
+                    podfile_content += line
+                else:
+                    list = line.strip().split(' ')
+                    #return json.dumps(list[1][1:-2])
+
+                    if len(list) > 2 and list[2] == ':git':
+
+                        file_path = "%s/dependency/%s" % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], list[1][1:-2])
+                        #return json.dumps(file_path)
+                        if not os.path.exists(file_path):
+                            #pass #git clone
+                            command = "cd ~/Projects/dependency/; \
+                            git clone %s %s;" \
+                            % (list[4][1:-2], list[1][1:-2])
+                            #return json.dumps(command)
+                            os.system(command)
+
+                        #return "0"
+
+
+                        command = "cd %s/dependency/%s; \
+                        git pull;\
+                        git log -1 | head -n1 ;" % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], list[1][1:-2])
+
+                        p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+                        for head in iter(p.stdout.readline, ''):
+
+                            if head[0:6] == "commit":
+
+                                #重写Podfile文件, 执行pod update
+                                #pod 'OHAttributedLabel', :git => 'git@git.corp.anjuke.com:_iOS/ThirdParty_OHAttributedLabel'
+                                #pod 'AFNetworking', :git => 'https://github.com/gowalla/AFNetworking.git', :commit => '082f8319af'
+                                if re.search(':commit', line):
+                                    replacement = "'%s'" % (head[7:17])
+                                    line = re.sub(list[-1], replacement, line)
+                                else:
+                                    replacement = "%s, :commit => '%s' " % (list[-1], head[7:17])
+                                    line = re.sub(list[-1], replacement, line)
+
+                                podfile_content += line
+
+                        # p.wait()
+
+                    else:  #没有git repo 的记录
+                        podfile_content += line
+            #############################################
+
+            fr.close()
+
+            #重写Podfile文件
+            fw = open(podfile_path, 'w')
+            fw.write(podfile_content)
+            fw.close()
+
+## 执行打包脚本
+	            cmd = ""
+        if packageType == "1":
+            cmd = "cd ~/Projects/%s/%s; ./build.sh Debug;" % (name, version)
+        elif packageType == "2":
+            cmd = "cd ~/Projects/%s/%s; ./build.sh Release;" % (name, version)
+        else:
+            cmd = "cd ~/Projects/%s/%s; ./qudaobuild.sh;" % (name, version)
+
+        os.system("cd ~/Projects/%s/%s; /usr/local/opt/ruby/bin/pod update;" %(name,version))
+        os.system(cmd)
+ * 正常结束or异常结束，输出写入log
+ * app的状态，写入db
+ * 执行更新最新文件的crontable脚本(在打包机器上异地执行)
+ 	    cmd = "ssh mobile@192.168.201.214 \"/bin/bash /var/www/packages/apps/latest.sh\""
+        os.system(cmd)
+
+
+## 显示主项目提交历史
+* cd到当前工程repo目录，执行git log命令，查看提交历史
+	    cmd = "cd %s/%s/%s; git hist" % (puzzle_configs.app.config["PUZZLE_PROJECT_PATH"], name, version)
+        commit_history = ""
+        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+        for line in iter(p.stdout.readline, ''):
+            commit_history += line
+        return json.dumps(commit_history)
